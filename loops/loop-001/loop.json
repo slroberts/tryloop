@@ -1,0 +1,27 @@
+{
+  "id": "loop-001",
+  "title": "Filter Adults",
+  "difficulty": 1,
+  "hintBudget": 3,
+  "exports": ["filterAdults"],
+  "spec": [
+    "Write a function `filterAdults(users)`.",
+    "Each user is an object like `{ age: number }`.",
+    "Return only users with `age >= 18`.",
+    "Do not mutate the input array."
+  ],
+  "examples": [
+    {
+      "input": [{ "age": 17 }, { "age": 18 }, { "age": 22 }],
+      "output": [{ "age": 18 }, { "age": 22 }]
+    }
+  ],
+  "starter": "export function filterAdults(users) {\n  // your code\n}\n",
+  "docs": [
+    {
+      "label": "Array.prototype.filter",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/filter"
+    }
+  ],
+  "glitches": ["COMPARATOR_OFF_BY_ONE", "MISSING_RETURN"]
+}
