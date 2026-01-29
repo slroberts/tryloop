@@ -9,6 +9,7 @@ type GradeBody = {
   loopId: string;
   code: string;
   failingTests: CoachFail[];
+  tier?: number;
 };
 
 type LoopJson = {
@@ -26,7 +27,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const { loopId, code, failingTests } = body;
+  const { loopId, code, failingTests, tier } = body;
 
   if (!loopId || typeof loopId !== 'string') {
     return NextResponse.json({ error: 'loopId is required' }, { status: 400 });
@@ -40,6 +41,12 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  if (tier != null && (typeof tier !== 'number' || tier < 1 || tier > 3)) {
+    return NextResponse.json(
+      { error: 'tier must be a number 1..3' },
+      { status: 400 },
+    );
+  }
 
   const loopPath = path.join(process.cwd(), 'loops', loopId, 'loop.json');
 
@@ -50,7 +57,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Loop not found' }, { status: 404 });
   }
 
-  const coach = gradeWithRules({ loop, code, failingTests });
+  const coach = gradeWithRules({ loop, code, failingTests, tier });
 
   return NextResponse.json(coach);
 }

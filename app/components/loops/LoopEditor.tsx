@@ -7,7 +7,7 @@ type Props = {
   loopId: string;
   initialCode: string;
   expectedExports?: string[];
-  hintBudget?: number;
+  hintBudget?: number; // tokens per loop (e.g. 3)
 };
 
 type UiTest = {
@@ -25,9 +25,11 @@ type RunResponse = {
 };
 
 type CoachResponse = {
+  tier: 1 | 2 | 3;
   nudge: string;
   questions: string[];
   doc: { label: string; url: string };
+  microExample?: string; // tier 3 optional
   safety: { no_full_solution: true; notes: string };
 };
 
@@ -35,20 +37,29 @@ function countLines(s: string) {
   return s.split('\n').length;
 }
 
-function storageKey(loopId: string) {
+function hintsKey(loopId: string) {
   return `tryloop:hintsLeft:${loopId}`;
+}
+
+function tierKey(loopId: string) {
+  return `tryloop:hintTierUsed:${loopId}`;
 }
 
 function isCoachResponse(x: unknown): x is CoachResponse {
   if (!x || typeof x !== 'object') return false;
-
   const o = x as any;
+
+  const tierOk = o.tier === 1 || o.tier === 2 || o.tier === 3;
+  const microOk = o.microExample == null || typeof o.microExample === 'string';
+
   return (
+    tierOk &&
     typeof o.nudge === 'string' &&
     Array.isArray(o.questions) &&
     o.doc &&
     typeof o.doc.label === 'string' &&
     typeof o.doc.url === 'string' &&
+    microOk &&
     o.safety &&
     o.safety.no_full_solution === true
   );
@@ -70,39 +81,65 @@ export default function LoopEditor({
   const [coachLoading, setCoachLoading] = useState(false);
   const [coachError, setCoachError] = useState<string | null>(null);
 
+  // Hint tokens + tier progression (per loop)
   const [hintsLeft, setHintsLeft] = useState<number>(hintBudget);
+  const [tierUsed, setTierUsed] = useState<number>(0); // 0..3 (0 = none revealed yet)
 
   const isDev = process.env.NODE_ENV !== 'production';
 
   const coachRef = useRef<HTMLDivElement | null>(null);
+
+  const maxTier = Math.min(3, hintBudget || 0);
+  const nextTier = Math.min(maxTier, tierUsed + 1);
 
   // Sync editor and per-loop state on navigation
   useEffect(() => {
     setCode(initialCode);
     setResult(null);
     setRunError(null);
+
     setCoach(null);
     setCoachError(null);
     setCoachLoading(false);
 
-    // Load per-loop hint state
-    const key = storageKey(loopId);
-    const raw =
-      typeof window !== 'undefined' ? window.localStorage.getItem(key) : null;
+    // Load tokens
+    const hk =
+      typeof window !== 'undefined'
+        ? window.localStorage.getItem(hintsKey(loopId))
+        : null;
 
-    if (raw != null) {
-      const n = Number(raw);
+    if (hk != null) {
+      const n = Number(hk);
       setHintsLeft(Number.isFinite(n) ? n : hintBudget);
     } else {
       setHintsLeft(hintBudget);
     }
+
+    // Load tier
+    const tk =
+      typeof window !== 'undefined'
+        ? window.localStorage.getItem(tierKey(loopId))
+        : null;
+
+    if (tk != null) {
+      const n = Number(tk);
+      setTierUsed(Number.isFinite(n) ? Math.max(0, Math.min(3, n)) : 0);
+    } else {
+      setTierUsed(0);
+    }
   }, [initialCode, loopId, hintBudget]);
 
-  // Persist hintsLeft
+  // Persist tokens
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(storageKey(loopId), String(hintsLeft));
+    window.localStorage.setItem(hintsKey(loopId), String(hintsLeft));
   }, [loopId, hintsLeft]);
+
+  // Persist tier
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(tierKey(loopId), String(tierUsed));
+  }, [loopId, tierUsed]);
 
   const stats = useMemo(() => {
     const lines = countLines(code);
@@ -130,14 +167,16 @@ export default function LoopEditor({
   const showCoachControls =
     hintBudget > 0 && !!result && !result.passed && failingTests.length > 0;
 
-  const resetHintDisabled = coachLoading || hintsLeft === hintBudget;
-  const hintDisabled = coachLoading || hintsLeft <= 0;
+  const resetHintDisabled =
+    coachLoading || (hintsLeft === hintBudget && tierUsed === 0);
+  const hintDisabled =
+    coachLoading || hintsLeft <= 0 || tierUsed >= maxTier || !showCoachControls;
 
   const handleRunTests = async () => {
     setRunning(true);
     setRunError(null);
 
-    // Reset coach output per run (do NOT refund hints)
+    // Reset coach output per run (do NOT refund tokens)
     setCoach(null);
     setCoachError(null);
     setCoachLoading(false);
@@ -166,16 +205,19 @@ export default function LoopEditor({
     }
   };
 
-  // Spend hint ONLY on success
+  // Spend 1 token to reveal the NEXT tier (only spend on success)
   const handleGetHint = async () => {
+    if (!showCoachControls) return;
     if (!result || result.passed) return;
     if (!failingTests.length) return;
     if (hintsLeft <= 0) return;
+    if (tierUsed >= maxTier) return;
 
     setCoachLoading(true);
     setCoach(null);
     setCoachError(null);
 
+    // Scroll immediately so user sees "Thinking..."
     coachRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
     try {
@@ -186,6 +228,7 @@ export default function LoopEditor({
           loopId,
           code,
           failingTests,
+          tier: nextTier, // ✅ tiered hint request
         }),
       });
 
@@ -203,11 +246,12 @@ export default function LoopEditor({
         return;
       }
 
-      // Success: set coach + spend hint
+      // Success: set coach + advance tier + spend token
       setCoach(payload);
+      setTierUsed(nextTier);
       setHintsLeft((h) => Math.max(0, h - 1));
 
-      // scroll again so the nudge lands nicely (optional but feels great)
+      // Scroll again so the hint lands nicely
       requestAnimationFrame(() => {
         coachRef.current?.scrollIntoView({
           behavior: 'smooth',
@@ -223,13 +267,14 @@ export default function LoopEditor({
   };
 
   const handleResetHintsDev = () => {
-    // Reset hints for this loop (dev-only)
     setHintsLeft(hintBudget);
+    setTierUsed(0);
     setCoach(null);
     setCoachError(null);
 
     if (typeof window !== 'undefined') {
-      window.localStorage.setItem(storageKey(loopId), String(hintBudget));
+      window.localStorage.setItem(hintsKey(loopId), String(hintBudget));
+      window.localStorage.setItem(tierKey(loopId), '0');
     }
   };
 
@@ -314,9 +359,20 @@ export default function LoopEditor({
 
             <div className='flex items-center gap-2'>
               <div className='text-xs opacity-60'>
-                Hints left: <span className='font-mono'>{hintsLeft}</span>
+                Tokens: <span className='font-mono'>{hintsLeft}</span>
                 {hintBudget ? (
                   <span className='opacity-60'>/{hintBudget}</span>
+                ) : null}
+                {maxTier ? (
+                  <>
+                    <span className='mx-2 opacity-60'>•</span>
+                    <span className='opacity-60'>
+                      Hint Tier:{' '}
+                      <span className='font-mono'>
+                        {Math.min(tierUsed, maxTier)}/{maxTier}
+                      </span>
+                    </span>
+                  </>
                 ) : null}
               </div>
 
@@ -326,7 +382,7 @@ export default function LoopEditor({
                   onClick={handleResetHintsDev}
                   disabled={resetHintDisabled}
                   className='rounded-lg border px-3 py-1.5 text-sm opacity-70 hover:opacity-100 disabled:opacity-60'
-                  title='Dev only: reset hint budget for this loop'
+                  title='Dev only: reset tokens + tier for this loop'
                 >
                   Reset hints
                 </button>
@@ -337,16 +393,26 @@ export default function LoopEditor({
                 onClick={handleGetHint}
                 disabled={hintDisabled}
                 className='rounded-lg border bg-black px-3 py-1.5 text-sm text-white disabled:opacity-60'
-                title={hintsLeft <= 0 ? 'No hints left' : 'Spend 1 hint'}
+                title={
+                  hintsLeft <= 0
+                    ? 'No tokens left'
+                    : tierUsed >= maxTier
+                      ? 'Max hint tier already revealed'
+                      : 'Spend 1 token'
+                }
               >
-                {coachLoading ? 'Thinking…' : 'Get hint (costs 1)'}
+                {coachLoading
+                  ? 'Thinking…'
+                  : tierUsed >= maxTier
+                    ? 'Max hint unlocked'
+                    : `Reveal Hint ${nextTier}/${maxTier} (costs 1)`}
               </button>
             </div>
           </div>
 
           {hintsLeft <= 0 ? (
             <div className='mt-2 text-sm opacity-70'>
-              You’re out of hints for this loop. Try reading the failing test
+              You’re out of tokens for this loop. Try reading the failing test
               and adjusting one small thing at a time.
             </div>
           ) : null}
@@ -362,6 +428,10 @@ export default function LoopEditor({
 
           {coach ? (
             <div className='mt-3 space-y-3'>
+              <div className='text-xs uppercase tracking-wide opacity-60'>
+                Hint {coach.tier}/3
+              </div>
+
               <div className='text-sm'>{coach.nudge}</div>
 
               <ul className='list-disc space-y-1 pl-5 text-sm'>
@@ -378,11 +448,17 @@ export default function LoopEditor({
               >
                 {coach.doc.label}
               </a>
+
+              {coach.microExample ? (
+                <pre className='mt-3 overflow-x-auto rounded-lg border bg-black/5 p-3 font-mono text-xs leading-relaxed whitespace-pre'>
+                  {coach.microExample}
+                </pre>
+              ) : null}
             </div>
           ) : (
             <div className='mt-3 text-sm opacity-70'>
-              Click <span className='font-medium'>Get hint</span> to spend one
-              hint and get a nudge.
+              Reveal hints progressively. Each reveal costs 1 token and unlocks
+              a stronger hint tier.
             </div>
           )}
         </div>
