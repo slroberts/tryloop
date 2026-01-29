@@ -156,6 +156,7 @@ export default async function LoopPage({
           loopId={loop.id}
           initialCode={loop.starter}
           expectedExports={loop.exports}
+          hintBudget={loop.hintBudget}
         />
       </section>
     </div>
